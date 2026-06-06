@@ -1,9 +1,9 @@
 """
-Giveaway Bot — embedslash command giveaway bot where YOU choose the winner.
+Giveaway Bot — slash command giveaway bot where YOU choose the winner.
 
 Setup:
   1. pip install -r requirements.txt
-  2. Create a .env file with: DISCORD_TOKEN=your_token_here
+  2. Set DISCORD_TOKEN as an environment variable (or in a .env file)
   3. python bot.py
 
 Slash Commands (owner-only):
@@ -16,14 +16,66 @@ Slash Commands (owner-only):
 """
 
 import os
+import json
 import random
 import discord
 from discord import app_commands
 from discord.ext import tasks
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
 OWNER_ID = 1435693467421376551
+SAVE_FILE = os.path.join(os.path.dirname(__file__), "giveaways.json")
+
+
+# ─── Persistence ─────────────────────────────────────────────────────────────
+
+def save_state():
+    """Serialize giveaways to disk after every mutation."""
+    data = {}
+    for msg_id, g in giveaways.items():
+        data[str(msg_id)] = {
+            "channel_id": g["channel_id"],
+            "prize": g["prize"],
+            "winners": g["winners"],
+            "host": g["host"],
+            "ends_at": g["ends_at"].isoformat(),
+            "entrants": list(g["entrants"]),
+            "ended": g["ended"],
+            "winner_ids": g.get("winner_ids"),
+            "forced_winner": g.get("forced_winner"),
+        }
+    try:
+        with open(SAVE_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"[save_state] Failed to save: {e}")
+
+
+def load_state():
+    """Load giveaways from disk on startup."""
+    if not os.path.exists(SAVE_FILE):
+        return
+    try:
+        with open(SAVE_FILE) as f:
+            data = json.load(f)
+        for msg_id_str, g in data.items():
+            msg_id = int(msg_id_str)
+            giveaways[msg_id] = {
+                "channel_id": g["channel_id"],
+                "prize": g["prize"],
+                "winners": g["winners"],
+                "host": g["host"],
+                "ends_at": datetime.fromisoformat(g["ends_at"]),
+                "entrants": set(g["entrants"]),
+                "ended": g["ended"],
+                "winner_ids": g.get("winner_ids"),
+                "forced_winner": g.get("forced_winner"),
+            }
+        active = sum(1 for g in giveaways.values() if not g["ended"])
+        print(f"[load_state] Restored {len(giveaways)} giveaway(s) ({active} active).")
+    except Exception as e:
+        print(f"[load_state] Failed to load: {e}")
 
 
 # ─── Bot setup ───────────────────────────────────────────────────────────────
@@ -42,14 +94,12 @@ class GiveawayBot(discord.Client):
 bot = GiveawayBot()
 
 # giveaways[message_id] = { channel_id, prize, winners, host, ends_at,
-#                            entrants (set), ended, winner_ids }
+#                            entrants (set), ended, winner_ids, forced_winner }
 giveaways: dict[int, dict] = {}
+load_state()
 
 
 # ─── Owner check ─────────────────────────────────────────────────────────────
-
-def is_owner(interaction: discord.Interaction) -> bool:
-    return interaction.user.id == OWNER_ID
 
 def owner_only(interaction: discord.Interaction) -> bool:
     if interaction.user.id != OWNER_ID:
@@ -97,7 +147,7 @@ def build_embed(g: dict, ended: bool = False) -> discord.Embed:
     return embed
 
 
-# ─── Button view ─────────────────────────────────────────────────────────────
+# ─── Button views ─────────────────────────────────────────────────────────────
 
 class LeaveView(discord.ui.View):
     def __init__(self, message_id: int, user_id: int):
@@ -114,12 +164,12 @@ class LeaveView(discord.ui.View):
         g = giveaways.get(self.message_id)
         if g and not g["ended"]:
             g["entrants"].discard(self.user_id)
+            save_state()
             try:
                 channel = bot.get_channel(g["channel_id"])
                 if channel:
                     msg = await channel.fetch_message(self.message_id)
-                    view = GiveawayView(self.message_id)
-                    await msg.edit(embed=build_embed(g), view=view)
+                    await msg.edit(embed=build_embed(g), view=GiveawayView(self.message_id))
             except Exception:
                 pass
 
@@ -137,7 +187,7 @@ class GiveawayView(discord.ui.View):
                        custom_id="giveaway_enter")
     async def enter(self, interaction: discord.Interaction, button: discord.ui.Button):
         g = giveaways.get(self.message_id)
-        if not g or g["ended"] or datetime.utcnow() > g["ends_at"]:
+        if not g or g["ended"] or datetime.now(timezone.utc).replace(tzinfo=None) > g["ends_at"].replace(tzinfo=None):
             await interaction.response.send_message(
                 "This giveaway has already ended.", ephemeral=True)
             return
@@ -145,17 +195,15 @@ class GiveawayView(discord.ui.View):
         uid = interaction.user.id
 
         if uid in g["entrants"]:
-            # Already entered — show "already entered" message with Leave button
-            leave_view = LeaveView(self.message_id, uid)
             await interaction.response.send_message(
                 "You have already entered this giveaway!",
-                view=leave_view,
+                view=LeaveView(self.message_id, uid),
                 ephemeral=True
             )
             return
 
-        # New entry — add silently and update the embed
         g["entrants"].add(uid)
+        save_state()
         await interaction.response.defer()
 
         try:
@@ -167,9 +215,8 @@ class GiveawayView(discord.ui.View):
 class EndedView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        btn = discord.ui.Button(
-            label="🎉", style=discord.ButtonStyle.grey, disabled=True)
-        self.add_item(btn)
+        self.add_item(discord.ui.Button(
+            label="🎉", style=discord.ButtonStyle.grey, disabled=True))
 
 
 # ─── Auto-end task ───────────────────────────────────────────────────────────
@@ -178,7 +225,7 @@ class EndedView(discord.ui.View):
 async def check_giveaways():
     now = datetime.utcnow()
     for msg_id, g in list(giveaways.items()):
-        if not g["ended"] and now >= g["ends_at"]:
+        if not g["ended"] and now >= g["ends_at"].replace(tzinfo=None):
             await conclude_giveaway(msg_id, random_pick=True)
 
 
@@ -201,6 +248,7 @@ async def conclude_giveaway(msg_id: int, random_pick: bool = True,
         winner_ids = []
 
     g["winner_ids"] = winner_ids
+    save_state()
 
     channel = bot.get_channel(g["channel_id"])
     if not channel:
@@ -214,9 +262,8 @@ async def conclude_giveaway(msg_id: int, random_pick: bool = True,
 
     if winner_ids:
         mentions = " ".join(f"<@{uid}>" for uid in winner_ids)
-        prize = g["prize"]
         await channel.send(
-            f"Congratulations {mentions}! You won the **{prize}**!"
+            f"Congratulations {mentions}! You won the **{g['prize']}**!"
         )
     else:
         await channel.send(
@@ -236,7 +283,7 @@ async def conclude_giveaway(msg_id: int, random_pick: bool = True,
 async def gcreate(interaction: discord.Interaction, duration: int, winners: int, prize: str):
     await interaction.response.defer(ephemeral=True)
 
-    ends_at = datetime.utcnow() + timedelta(seconds=duration)
+    ends_at = datetime.utcnow() + __import__("datetime").timedelta(seconds=duration)
     g = {
         "channel_id": interaction.channel_id,
         "prize": prize,
@@ -246,19 +293,20 @@ async def gcreate(interaction: discord.Interaction, duration: int, winners: int,
         "entrants": set(),
         "ended": False,
         "winner_ids": None,
+        "forced_winner": None,
     }
 
-    # Send a placeholder to get the message ID, then update with the real view
     placeholder = await interaction.channel.send("Starting giveaway…")
     g_id = placeholder.id
     giveaways[g_id] = g
+    save_state()
 
     view = GiveawayView(g_id)
     await placeholder.edit(content=None, embed=build_embed(g), view=view)
 
     await interaction.followup.send(
         f"✅ Giveaway started! Message ID: `{g_id}`\n"
-        f"Use `/gpick message_id:` `{g_id}` `user: @someone` to force a winner.",
+        f"Use `/gpick message_id:{g_id} user:@someone` to force a winner.",
         ephemeral=True
     )
 
@@ -288,6 +336,8 @@ async def gpick(interaction: discord.Interaction, message_id: str, user: discord
 
     g["entrants"].add(user.id)
     g["forced_winner"] = user.id
+    save_state()
+
     await interaction.followup.send(
         f"✅ **{user.display_name}** is queued as the winner of **{g['prize']}**. "
         f"They will be announced when the giveaway ends.",
@@ -345,6 +395,7 @@ async def greroll(interaction: discord.Interaction, message_id: str):
     pool = list(g["entrants"])
     new_winners = random.sample(pool, min(g["winners"], len(pool)))
     g["winner_ids"] = new_winners
+    save_state()
 
     mentions = " ".join(f"<@{uid}>" for uid in new_winners)
     channel = bot.get_channel(g["channel_id"])
@@ -379,7 +430,7 @@ async def gentrants(interaction: discord.Interaction, message_id: str):
     lines = [f"**Entrants for {g['prize']}** ({len(g['entrants'])} total):"]
     for uid in g["entrants"]:
         member = interaction.guild.get_member(uid) if interaction.guild else None
-        name = member.display_name if member else f"Unknown"
+        name = member.display_name if member else "Unknown"
         lines.append(f"• {name} — <@{uid}>")
 
     await interaction.followup.send("\n".join(lines), ephemeral=True)
@@ -427,7 +478,8 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     print("Slash commands synced. Use /gcreate to start a giveaway.")
-    check_giveaways.start()
+    if not check_giveaways.is_running():
+        check_giveaways.start()
 
 
 # ─── Run ─────────────────────────────────────────────────────────────────────
@@ -435,6 +487,6 @@ async def on_ready():
 if __name__ == "__main__":
     if not TOKEN:
         print("ERROR: No DISCORD_TOKEN found.")
-        print("Create a .env file with: DISCORD_TOKEN=your_token_here")
+        print("Set the DISCORD_TOKEN environment variable.")
         exit(1)
     bot.run(TOKEN)
