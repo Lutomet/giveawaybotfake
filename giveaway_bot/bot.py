@@ -1,145 +1,151 @@
 """
-Giveaway Bot — fake giveaway bot where YOU choose the winner.
+Giveaway Bot — slash command giveaway bot where YOU choose the winner.
 
 Setup:
   1. pip install -r requirements.txt
   2. Create a .env file with: DISCORD_TOKEN=your_token_here
   3. python bot.py
 
-Commands (use in any channel):
-  !gcreate <duration_seconds> <winners> <prize>
-      — Start a giveaway. Users click the button to enter.
-      — Example: !gcreate 60 1 Nitro Classic
-
-  !gpick <message_id> @user
-      — Manually pick a specific winner from the entrants.
-      — Example: !gpick 1234567890 @someone
-
-  !gend <message_id>
-      — End a giveaway and pick a random winner from real entrants.
-
-  !greroll <message_id>
-      — Reroll a winner (random, from the same entrant pool).
-
-  !glist
-      — List all active giveaways in the server.
-
-  !gentrants <message_id>
-      — Show everyone who entered a giveaway.
+Slash Commands (owner-only):
+  /gcreate duration winners prize  — Start a giveaway
+  /gpick message_id user           — Force a specific winner (looks random)
+  /gend message_id                 — End early with a random winner
+  /greroll message_id              — Reroll a new random winner
+  /gentrants message_id            — See everyone who entered
+  /glist                           — List all active giveaways
 """
 
 import os
 import random
-import asyncio
 import discord
-from discord.ext import commands, tasks
+from discord import app_commands
+from discord.ext import tasks
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
+OWNER_ID = 1435693467421376551
+
+
+# ─── Bot setup ───────────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
-intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+class GiveawayBot(discord.Client):
+    def __init__(self):
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
 
-# giveaways[message_id] = {
-#   "channel_id": int,
-#   "prize": str,
-#   "winners": int,
-#   "host": int (user id),
-#   "ends_at": datetime,
-#   "entrants": set of user_ids,
-#   "ended": bool,
-#   "winner_ids": list of user_ids or None
-# }
+    async def setup_hook(self):
+        await self.tree.sync()
+        print("Slash commands synced.")
+
+bot = GiveawayBot()
+
+# giveaways[message_id] = { channel_id, prize, winners, host, ends_at,
+#                            entrants (set), ended, winner_ids }
 giveaways: dict[int, dict] = {}
 
 
-# ─── Helpers ────────────────────────────────────────────────────────────────
+# ─── Owner check ─────────────────────────────────────────────────────────────
 
-def format_time(seconds: int) -> str:
-    if seconds < 60:
-        return f"{seconds}s"
-    if seconds < 3600:
-        m, s = divmod(seconds, 60)
-        return f"{m}m {s}s" if s else f"{m}m"
-    h, remainder = divmod(seconds, 3600)
-    m, s = divmod(remainder, 60)
-    return f"{h}h {m}m" if m else f"{h}h"
+def is_owner(interaction: discord.Interaction) -> bool:
+    return interaction.user.id == OWNER_ID
+
+def owner_only(interaction: discord.Interaction) -> bool:
+    if interaction.user.id != OWNER_ID:
+        raise app_commands.CheckFailure("Only the bot owner can use this command.")
+    return True
 
 
-def giveaway_embed(prize: str, host_id: int, ends_at: datetime,
-                   winner_count: int, entrant_count: int,
-                   ended: bool = False, winner_ids: list = None) -> discord.Embed:
-    color = discord.Color.gold() if not ended else discord.Color.greyple()
-    title = "🎉 GIVEAWAY ENDED 🎉" if ended else "🎉 GIVEAWAY 🎉"
+# ─── Embed builder ───────────────────────────────────────────────────────────
 
-    embed = discord.Embed(title=title, description=f"**{prize}**", color=color)
+def build_embed(g: dict, ended: bool = False) -> discord.Embed:
+    ends_at: datetime = g["ends_at"]
+    ts = int(ends_at.timestamp())
 
-    if ended and winner_ids:
-        winners_text = " ".join(f"<@{uid}>" for uid in winner_ids)
-        embed.add_field(name="Winner(s)", value=winners_text, inline=False)
-    elif ended:
-        embed.add_field(name="Winner(s)", value="No valid entrants.", inline=False)
+    if ended:
+        color = 0x2b2d31  # dark/neutral
+        if g.get("winner_ids"):
+            winners_text = " ".join(f"<@{uid}>" for uid in g["winner_ids"])
+            body = (
+                f"**{g['prize']}**\n\n"
+                f"**Winner(s):** {winners_text}\n"
+                f"**Hosted by:** <@{g['host']}>\n"
+                f"**Entries:** {len(g['entrants'])}\n"
+                f"**Winners:** {g['winners']}"
+            )
+        else:
+            body = (
+                f"**{g['prize']}**\n\n"
+                f"**Winner(s):** No valid entrants.\n"
+                f"**Hosted by:** <@{g['host']}>\n"
+                f"**Entries:** {len(g['entrants'])}\n"
+                f"**Winners:** {g['winners']}"
+            )
+        embed = discord.Embed(description=body, color=color)
+        embed.set_footer(text=f"Ended at")
+        embed.timestamp = ends_at
     else:
-        embed.add_field(name="Ends", value=f"<t:{int(ends_at.timestamp())}:R>", inline=True)
-
-    embed.add_field(name="Winners", value=str(winner_count), inline=True)
-    embed.add_field(name="Entries", value=str(entrant_count), inline=True)
-    embed.add_field(name="Hosted by", value=f"<@{host_id}>", inline=True)
-
-    if not ended:
-        embed.set_footer(text="Click the button below to enter!")
-    else:
-        embed.set_footer(text="Giveaway ended.")
+        color = 0x2b2d31
+        body = (
+            f"**{g['prize']}**\n\n"
+            f"**Ends:** <t:{ts}:R> (<t:{ts}:f>)\n"
+            f"**Hosted by:** <@{g['host']}>\n"
+            f"**Entries:** {len(g['entrants'])}\n"
+            f"**Winners:** {g['winners']}"
+        )
+        embed = discord.Embed(description=body, color=color)
+        embed.set_footer(text="")
+        embed.timestamp = ends_at
 
     return embed
 
+
+# ─── Button view ─────────────────────────────────────────────────────────────
 
 class GiveawayView(discord.ui.View):
     def __init__(self, message_id: int):
         super().__init__(timeout=None)
         self.message_id = message_id
 
-    @discord.ui.button(label="🎉 Enter Giveaway", style=discord.ButtonStyle.green,
+    @discord.ui.button(label="🎉", style=discord.ButtonStyle.blurple,
                        custom_id="giveaway_enter")
     async def enter(self, interaction: discord.Interaction, button: discord.ui.Button):
         g = giveaways.get(self.message_id)
-        if not g:
-            await interaction.response.send_message("This giveaway no longer exists.", ephemeral=True)
-            return
-        if g["ended"]:
-            await interaction.response.send_message("This giveaway has already ended.", ephemeral=True)
-            return
-        if datetime.utcnow() > g["ends_at"]:
-            await interaction.response.send_message("This giveaway has already ended.", ephemeral=True)
+        if not g or g["ended"] or datetime.utcnow() > g["ends_at"]:
+            await interaction.response.send_message(
+                "This giveaway has already ended.", ephemeral=True)
             return
 
         uid = interaction.user.id
         if uid in g["entrants"]:
             g["entrants"].discard(uid)
-            await interaction.response.send_message(
-                "You left the giveaway. Click again to re-enter.", ephemeral=True)
+            msg = f"You left the giveaway for **{g['prize']}**. Click again to re-enter."
         else:
             g["entrants"].add(uid)
-            await interaction.response.send_message(
-                f"✅ You entered for **{g['prize']}**! Good luck!", ephemeral=True)
+            msg = f"✅ You entered for **{g['prize']}**! Good luck!"
 
-        # Update the embed entry count
+        await interaction.response.send_message(msg, ephemeral=True)
+
+        # Refresh embed entry count
         channel = bot.get_channel(g["channel_id"])
         if channel:
             try:
-                msg = await channel.fetch_message(self.message_id)
-                embed = giveaway_embed(
-                    g["prize"], g["host"], g["ends_at"],
-                    g["winners"], len(g["entrants"])
-                )
-                await msg.edit(embed=embed, view=self)
+                discord_msg = await channel.fetch_message(self.message_id)
+                await discord_msg.edit(embed=build_embed(g), view=self)
             except Exception:
                 pass
+
+
+class EndedView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        btn = discord.ui.Button(
+            label="🎉", style=discord.ButtonStyle.grey, disabled=True)
+        self.add_item(btn)
 
 
 # ─── Auto-end task ───────────────────────────────────────────────────────────
@@ -149,15 +155,14 @@ async def check_giveaways():
     now = datetime.utcnow()
     for msg_id, g in list(giveaways.items()):
         if not g["ended"] and now >= g["ends_at"]:
-            await end_giveaway(msg_id, random_pick=True)
+            await conclude_giveaway(msg_id, random_pick=True)
 
 
-async def end_giveaway(msg_id: int, random_pick: bool = True,
-                       forced_winners: list[int] = None):
+async def conclude_giveaway(msg_id: int, random_pick: bool = True,
+                             forced_winners: list[int] | None = None):
     g = giveaways.get(msg_id)
     if not g or g["ended"]:
         return
-
     g["ended"] = True
 
     if forced_winners:
@@ -176,25 +181,16 @@ async def end_giveaway(msg_id: int, random_pick: bool = True,
         return
 
     try:
-        msg = await channel.fetch_message(msg_id)
-        embed = giveaway_embed(
-            g["prize"], g["host"], g["ends_at"],
-            g["winners"], len(g["entrants"]),
-            ended=True, winner_ids=winner_ids
-        )
-        disabled_view = discord.ui.View()
-        btn = discord.ui.Button(label="🎉 Giveaway Ended", style=discord.ButtonStyle.grey,
-                                disabled=True)
-        disabled_view.add_item(btn)
-        await msg.edit(embed=embed, view=disabled_view)
+        discord_msg = await channel.fetch_message(msg_id)
+        await discord_msg.edit(embed=build_embed(g, ended=True), view=EndedView())
     except Exception:
-        pass
+        discord_msg = None
 
+    jump = discord_msg.jump_url if discord_msg else ""
     if winner_ids:
         mentions = " ".join(f"<@{uid}>" for uid in winner_ids)
         await channel.send(
-            f"🎉 Congratulations {mentions}! You won **{g['prize']}**!\n"
-            f"[Jump to giveaway]({msg.jump_url})"
+            f"🎉 Congratulations {mentions}! You won **{g['prize']}**! {jump}"
         )
     else:
         await channel.send(
@@ -202,99 +198,121 @@ async def end_giveaway(msg_id: int, random_pick: bool = True,
         )
 
 
-# ─── Commands ────────────────────────────────────────────────────────────────
+# ─── Slash Commands ───────────────────────────────────────────────────────────
 
-@bot.command(name="gcreate")
-@commands.has_permissions(manage_guild=True)
-async def gcreate(ctx, duration: int, winner_count: int, *, prize: str):
-    """!gcreate <seconds> <winners> <prize>"""
-    await ctx.message.delete()
+@bot.tree.command(name="gcreate", description="Start a giveaway")
+@app_commands.check(owner_only)
+@app_commands.describe(
+    duration="Duration in seconds (e.g. 86400 = 1 day)",
+    winners="Number of winners",
+    prize="What are you giving away?"
+)
+async def gcreate(interaction: discord.Interaction, duration: int, winners: int, prize: str):
+    await interaction.response.defer(ephemeral=True)
 
     ends_at = datetime.utcnow() + timedelta(seconds=duration)
-    embed = giveaway_embed(prize, ctx.author.id, ends_at, winner_count, 0)
-
-    view = discord.ui.View()
-    view.add_item(discord.ui.Button(
-        label="🎉 Enter Giveaway", style=discord.ButtonStyle.green,
-        custom_id="giveaway_enter_placeholder"
-    ))
-
-    msg = await ctx.send(embed=embed)
-
-    giveaways[msg.id] = {
-        "channel_id": ctx.channel.id,
+    g = {
+        "channel_id": interaction.channel_id,
         "prize": prize,
-        "winners": winner_count,
-        "host": ctx.author.id,
+        "winners": winners,
+        "host": interaction.user.id,
         "ends_at": ends_at,
         "entrants": set(),
         "ended": False,
         "winner_ids": None,
     }
 
-    real_view = GiveawayView(msg.id)
-    embed = giveaway_embed(prize, ctx.author.id, ends_at, winner_count, 0)
-    await msg.edit(embed=embed, view=real_view)
+    # Send a placeholder to get the message ID, then update with the real view
+    placeholder = await interaction.channel.send("Starting giveaway…")
+    g_id = placeholder.id
+    giveaways[g_id] = g
 
-    await ctx.send(
-        f"✅ Giveaway started! It ends in **{format_time(duration)}**.\n"
-        f"Message ID: `{msg.id}` — use `!gpick {msg.id} @user` to force a winner.",
-        delete_after=15
+    view = GiveawayView(g_id)
+    await placeholder.edit(content=None, embed=build_embed(g), view=view)
+
+    await interaction.followup.send(
+        f"✅ Giveaway started! Message ID: `{g_id}`\n"
+        f"Use `/gpick message_id:` `{g_id}` `user: @someone` to force a winner.",
+        ephemeral=True
     )
 
 
-@bot.command(name="gpick")
-@commands.has_permissions(manage_guild=True)
-async def gpick(ctx, message_id: int, member: discord.Member):
-    """!gpick <message_id> @user  — Manually force this person to win."""
-    g = giveaways.get(message_id)
-    if not g:
-        await ctx.send("❌ Giveaway not found. Check the message ID.", delete_after=10)
-        return
-    if g["ended"]:
-        await ctx.send("❌ That giveaway has already ended.", delete_after=10)
+@bot.tree.command(name="gpick", description="Manually force a specific person to win")
+@app_commands.check(owner_only)
+@app_commands.describe(
+    message_id="The giveaway message ID",
+    user="The user you want to win"
+)
+async def gpick(interaction: discord.Interaction, message_id: str, user: discord.Member):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        msg_id = int(message_id)
+    except ValueError:
+        await interaction.followup.send("❌ Invalid message ID.", ephemeral=True)
         return
 
-    # Add them to entrants if not already in
-    g["entrants"].add(member.id)
-    await end_giveaway(message_id, random_pick=False, forced_winners=[member.id])
-    await ctx.send(
-        f"✅ **{member.display_name}** has been manually selected as the winner of **{g['prize']}**!",
-        delete_after=15
+    g = giveaways.get(msg_id)
+    if not g:
+        await interaction.followup.send("❌ Giveaway not found.", ephemeral=True)
+        return
+    if g["ended"]:
+        await interaction.followup.send("❌ That giveaway has already ended.", ephemeral=True)
+        return
+
+    g["entrants"].add(user.id)
+    await conclude_giveaway(msg_id, random_pick=False, forced_winners=[user.id])
+    await interaction.followup.send(
+        f"✅ **{user.display_name}** has been picked as the winner of **{g['prize']}**.",
+        ephemeral=True
     )
-    await ctx.message.delete()
 
 
-@bot.command(name="gend")
-@commands.has_permissions(manage_guild=True)
-async def gend(ctx, message_id: int):
-    """!gend <message_id>  — End a giveaway early with a random winner."""
-    g = giveaways.get(message_id)
+@bot.tree.command(name="gend", description="End a giveaway early with a random winner")
+@app_commands.check(owner_only)
+@app_commands.describe(message_id="The giveaway message ID")
+async def gend(interaction: discord.Interaction, message_id: str):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        msg_id = int(message_id)
+    except ValueError:
+        await interaction.followup.send("❌ Invalid message ID.", ephemeral=True)
+        return
+
+    g = giveaways.get(msg_id)
     if not g:
-        await ctx.send("❌ Giveaway not found.", delete_after=10)
+        await interaction.followup.send("❌ Giveaway not found.", ephemeral=True)
         return
     if g["ended"]:
-        await ctx.send("❌ That giveaway has already ended.", delete_after=10)
+        await interaction.followup.send("❌ Already ended.", ephemeral=True)
         return
 
-    await end_giveaway(message_id, random_pick=True)
-    await ctx.send("✅ Giveaway ended.", delete_after=10)
-    await ctx.message.delete()
+    await conclude_giveaway(msg_id, random_pick=True)
+    await interaction.followup.send("✅ Giveaway ended.", ephemeral=True)
 
 
-@bot.command(name="greroll")
-@commands.has_permissions(manage_guild=True)
-async def greroll(ctx, message_id: int):
-    """!greroll <message_id>  — Reroll a new random winner from the same entrant pool."""
-    g = giveaways.get(message_id)
+@bot.tree.command(name="greroll", description="Pick a new random winner from the same entrant pool")
+@app_commands.check(owner_only)
+@app_commands.describe(message_id="The giveaway message ID")
+async def greroll(interaction: discord.Interaction, message_id: str):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        msg_id = int(message_id)
+    except ValueError:
+        await interaction.followup.send("❌ Invalid message ID.", ephemeral=True)
+        return
+
+    g = giveaways.get(msg_id)
     if not g:
-        await ctx.send("❌ Giveaway not found.", delete_after=10)
+        await interaction.followup.send("❌ Giveaway not found.", ephemeral=True)
         return
     if not g["ended"]:
-        await ctx.send("❌ That giveaway hasn't ended yet. Use `!gend` first.", delete_after=10)
+        await interaction.followup.send("❌ Giveaway hasn't ended yet.", ephemeral=True)
         return
     if not g["entrants"]:
-        await ctx.send("❌ No entrants to reroll from.", delete_after=10)
+        await interaction.followup.send("❌ No entrants to reroll from.", ephemeral=True)
         return
 
     pool = list(g["entrants"])
@@ -302,124 +320,87 @@ async def greroll(ctx, message_id: int):
     g["winner_ids"] = new_winners
 
     mentions = " ".join(f"<@{uid}>" for uid in new_winners)
-    await ctx.send(f"🎉 Reroll! New winner(s): {mentions} for **{g['prize']}**!")
-    await ctx.message.delete()
+    channel = bot.get_channel(g["channel_id"])
+    if channel:
+        await channel.send(f"🎉 Reroll! New winner(s): {mentions} for **{g['prize']}**!")
+
+    await interaction.followup.send(f"✅ Rerolled. New winner(s): {mentions}", ephemeral=True)
 
 
-@bot.command(name="gentrants")
-@commands.has_permissions(manage_guild=True)
-async def gentrants(ctx, message_id: int):
-    """!gentrants <message_id>  — List everyone who entered."""
-    g = giveaways.get(message_id)
+@bot.tree.command(name="gentrants", description="See everyone who entered a giveaway")
+@app_commands.check(owner_only)
+@app_commands.describe(message_id="The giveaway message ID")
+async def gentrants(interaction: discord.Interaction, message_id: str):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        msg_id = int(message_id)
+    except ValueError:
+        await interaction.followup.send("❌ Invalid message ID.", ephemeral=True)
+        return
+
+    g = giveaways.get(msg_id)
     if not g:
-        await ctx.send("❌ Giveaway not found.", delete_after=10)
+        await interaction.followup.send("❌ Giveaway not found.", ephemeral=True)
         return
 
     if not g["entrants"]:
-        await ctx.send(f"No one has entered the giveaway for **{g['prize']}** yet.", delete_after=15)
+        await interaction.followup.send(
+            f"No one has entered the giveaway for **{g['prize']}** yet.", ephemeral=True)
         return
 
     lines = [f"**Entrants for {g['prize']}** ({len(g['entrants'])} total):"]
     for uid in g["entrants"]:
-        member = ctx.guild.get_member(uid)
-        name = member.display_name if member else f"Unknown ({uid})"
-        lines.append(f"• {name} — `{uid}`")
+        member = interaction.guild.get_member(uid) if interaction.guild else None
+        name = member.display_name if member else f"Unknown"
+        lines.append(f"• {name} — <@{uid}>")
 
-    await ctx.send("\n".join(lines), delete_after=30)
-    await ctx.message.delete()
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
 
 
-@bot.command(name="glist")
-@commands.has_permissions(manage_guild=True)
-async def glist(ctx):
-    """!glist  — Show all active giveaways."""
+@bot.tree.command(name="glist", description="List all active giveaways")
+@app_commands.check(owner_only)
+async def glist(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
     active = [(mid, g) for mid, g in giveaways.items() if not g["ended"]]
     if not active:
-        await ctx.send("No active giveaways right now.", delete_after=10)
+        await interaction.followup.send("No active giveaways right now.", ephemeral=True)
         return
 
     lines = [f"**Active Giveaways ({len(active)}):**"]
     for mid, g in active:
         channel = bot.get_channel(g["channel_id"])
-        ch_name = channel.mention if channel else "Unknown channel"
+        ch = channel.mention if channel else "Unknown"
         lines.append(
-            f"• **{g['prize']}** — {ch_name} — {len(g['entrants'])} entrant(s) "
+            f"• **{g['prize']}** — {ch} — {len(g['entrants'])} entrant(s) "
             f"— ends <t:{int(g['ends_at'].timestamp())}:R> — ID: `{mid}`"
         )
 
-    await ctx.send("\n".join(lines), delete_after=30)
-    await ctx.message.delete()
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
 
 
-@bot.command(name="ghelp")
-async def ghelp(ctx):
-    """!ghelp  — Show all giveaway commands."""
-    embed = discord.Embed(title="🎉 Giveaway Bot Commands", color=discord.Color.gold())
-    embed.add_field(
-        name="!gcreate <seconds> <winners> <prize>",
-        value="Start a giveaway. Example: `!gcreate 120 1 Nitro Classic`",
-        inline=False
-    )
-    embed.add_field(
-        name="!gpick <message_id> @user",
-        value="**Manually pick a specific winner.** The bot announces them as if they won randomly.",
-        inline=False
-    )
-    embed.add_field(
-        name="!gend <message_id>",
-        value="End a giveaway early with a random winner from real entrants.",
-        inline=False
-    )
-    embed.add_field(
-        name="!greroll <message_id>",
-        value="Pick a new random winner from the same entrant pool.",
-        inline=False
-    )
-    embed.add_field(
-        name="!gentrants <message_id>",
-        value="List everyone who entered a giveaway.",
-        inline=False
-    )
-    embed.add_field(
-        name="!glist",
-        value="Show all currently active giveaways.",
-        inline=False
-    )
-    embed.set_footer(text="Most commands require Manage Server permission.")
-    await ctx.send(embed=embed)
+# ─── Error handler ────────────────────────────────────────────────────────────
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CheckFailure):
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ You don't have permission to use this command.", ephemeral=True)
+    else:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                f"❌ An error occurred: {error}", ephemeral=True)
 
 
-# ─── Events ──────────────────────────────────────────────────────────────────
+# ─── Events ───────────────────────────────────────────────────────────────────
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    print("Giveaway bot is online. Use !ghelp to see commands.")
+    print("Slash commands synced. Use /gcreate to start a giveaway.")
     check_giveaways.start()
-
-
-@bot.event
-async def on_interaction(interaction: discord.Interaction):
-    if interaction.type == discord.InteractionType.component:
-        custom_id = interaction.data.get("custom_id", "")
-        if custom_id == "giveaway_enter":
-            # Find which giveaway this message belongs to
-            msg_id = interaction.message.id
-            if msg_id in giveaways:
-                view = GiveawayView(msg_id)
-                await view.enter.callback(view, interaction)
-
-
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ You need **Manage Server** permission to use this command.", delete_after=8)
-    elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ Missing argument. Use `!ghelp` to see usage.", delete_after=8)
-    elif isinstance(error, commands.BadArgument):
-        await ctx.send(f"❌ Invalid argument. Use `!ghelp` to see usage.", delete_after=8)
-    else:
-        raise error
 
 
 # ─── Run ─────────────────────────────────────────────────────────────────────
