@@ -1,7 +1,0 @@
-[build]
-builder = "nixpacks"
-buildCommand = "pip install -r giveaway_bot/requirements.txt"
-
-[deploy]
-startCommand = "python3 giveaway_bot/bot.py"
-restartPolicyType = "always"
