@@ -1,0 +1,63 @@
+During handling of the above exception, another exception occurred:
+Traceback (most recent call last):
+  File "/app/.venv/lib/python3.13/site-packages/discord/app_commands/tree.py", line 1138, in wrapper
+    await self._call(interaction)
+  File "/app/.venv/lib/python3.13/site-packages/discord/app_commands/tree.py", line 1306, in _call
+    await self.on_error(interaction, e)
+  File "/app/giveaway_bot/bot.py", line 471, in on_app_command_error
+    await interaction.response.send_message(
+        f"❌ An error occurred: {error}", ephemeral=True)
+discord.errors.HTTPException: 400 Bad Request (error code: 40060): Interaction has already been acknowledged.
+  File "/app/.venv/lib/python3.13/site-packages/discord/interactions.py", line 1085, in send_message
+    data = await adapter.create_interaction_response(
+    ^
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/.venv/lib/python3.13/site-packages/discord/webhook/async_.py", line 226, in request
+    ...<6 lines>...
+    raise HTTPException(response, data)
+    )
+Task exception was never retrieved
+future: <Task finished name='CommandTree-invoker' coro=<CommandTree._from_interaction.<locals>.wrapper() done, defined at /app/.venv/lib/python3.13/site-packages/discord/app_commands/tree.py:1136> exception=HTTPException('400 Bad Request (error code: 40060): Interaction has already been acknowledged.')>
+Traceback (most recent call last):
+  File "/app/.venv/lib/python3.13/site-packages/discord/app_commands/commands.py", line 859, in _do_call
+    return await self._callback(interaction, **params)  # type: ignore
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/giveaway_bot/bot.py", line 412, in gentrants
+    await interaction.response.defer(ephemeral=True)
+  File "/app/.venv/lib/python3.13/site-packages/discord/interactions.py", line 892, in defer
+    response = await adapter.create_interaction_response(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "/app/.venv/lib/python3.13/site-packages/discord/webhook/async_.py", line 224, in request
+    raise NotFound(response, data)
+discord.errors.NotFound: 404 Not Found (error code: 10062): Unknown interaction
+The above exception was the direct cause of the following exception:
+Traceback (most recent call last):
+  File "/app/.venv/lib/python3.13/site-packages/discord/app_commands/tree.py", line 1302, in _call
+    await command._invoke_with_namespace(interaction, namespace)
+  File "/app/.venv/lib/python3.13/site-packages/discord/app_commands/commands.py", line 884, in _invoke_with_namespace
+    return await self._do_call(interaction, transformed_values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/.venv/lib/python3.13/site-packages/discord/app_commands/commands.py", line 877, in _do_call
+    raise CommandInvokeError(self, e) from e
+discord.app_commands.errors.CommandInvokeError: Command 'gentrants' raised an exception: NotFound: 404 Not Found (error code: 10062): Unknown interaction
+During handling of the above exception, another exception occurred:
+Traceback (most recent call last):
+  File "/app/.venv/lib/python3.13/site-packages/discord/app_commands/tree.py", line 1138, in wrapper
+    await self._call(interaction)
+  File "/app/.venv/lib/python3.13/site-packages/discord/app_commands/tree.py", line 1306, in _call
+    await self.on_error(interaction, e)
+  File "/app/giveaway_bot/bot.py", line 471, in on_app_command_error
+    await interaction.response.send_message(
+        f"❌ An error occurred: {error}", ephemeral=True)
+  File "/app/.venv/lib/python3.13/site-packages/discord/interactions.py", line 1085, in send_message
+    data = await adapter.create_interaction_response(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "/app/.venv/lib/python3.13/site-packages/discord/webhook/async_.py", line 226, in request
+    raise HTTPException(response, data)
+discord.errors.HTTPException: 400 Bad Request (error code: 40060): Interaction has already been acknowledged.

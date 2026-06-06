@@ -107,6 +107,15 @@ def owner_only(interaction: discord.Interaction) -> bool:
     return True
 
 
+async def safe_defer(interaction: discord.Interaction) -> bool:
+    """Defer the interaction. Returns False if the interaction already expired."""
+    try:
+        await interaction.response.defer(ephemeral=True)
+        return True
+    except (discord.errors.NotFound, discord.errors.HTTPException):
+        return False
+
+
 # ─── Embed builder ───────────────────────────────────────────────────────────
 
 BLUE = 0x5865F2
@@ -281,7 +290,7 @@ async def conclude_giveaway(msg_id: int, random_pick: bool = True,
     prize="What are you giving away?"
 )
 async def gcreate(interaction: discord.Interaction, duration: int, winners: int, prize: str):
-    await interaction.response.defer(ephemeral=True)
+    if not await safe_defer(interaction): return
 
     ends_at = datetime.utcnow() + __import__("datetime").timedelta(seconds=duration)
     g = {
@@ -318,7 +327,7 @@ async def gcreate(interaction: discord.Interaction, duration: int, winners: int,
     user="The user you want to win"
 )
 async def gpick(interaction: discord.Interaction, message_id: str, user: discord.Member):
-    await interaction.response.defer(ephemeral=True)
+    if not await safe_defer(interaction): return
 
     try:
         msg_id = int(message_id)
@@ -349,7 +358,7 @@ async def gpick(interaction: discord.Interaction, message_id: str, user: discord
 @app_commands.check(owner_only)
 @app_commands.describe(message_id="The giveaway message ID")
 async def gend(interaction: discord.Interaction, message_id: str):
-    await interaction.response.defer(ephemeral=True)
+    if not await safe_defer(interaction): return
 
     try:
         msg_id = int(message_id)
@@ -373,7 +382,7 @@ async def gend(interaction: discord.Interaction, message_id: str):
 @app_commands.check(owner_only)
 @app_commands.describe(message_id="The giveaway message ID")
 async def greroll(interaction: discord.Interaction, message_id: str):
-    await interaction.response.defer(ephemeral=True)
+    if not await safe_defer(interaction): return
 
     try:
         msg_id = int(message_id)
@@ -409,7 +418,7 @@ async def greroll(interaction: discord.Interaction, message_id: str):
 @app_commands.check(owner_only)
 @app_commands.describe(message_id="The giveaway message ID")
 async def gentrants(interaction: discord.Interaction, message_id: str):
-    await interaction.response.defer(ephemeral=True)
+    if not await safe_defer(interaction): return
 
     try:
         msg_id = int(message_id)
@@ -439,7 +448,7 @@ async def gentrants(interaction: discord.Interaction, message_id: str):
 @bot.tree.command(name="glist", description="List all active giveaways")
 @app_commands.check(owner_only)
 async def glist(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
+    if not await safe_defer(interaction): return
 
     active = [(mid, g) for mid, g in giveaways.items() if not g["ended"]]
     if not active:
@@ -462,14 +471,18 @@ async def glist(interaction: discord.Interaction):
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.CheckFailure):
-        if not interaction.response.is_done():
-            await interaction.response.send_message(
-                "❌ You don't have permission to use this command.", ephemeral=True)
-    else:
-        if not interaction.response.is_done():
-            await interaction.response.send_message(
-                f"❌ An error occurred: {error}", ephemeral=True)
+    msg = (
+        "❌ You don't have permission to use this command."
+        if isinstance(error, app_commands.CheckFailure)
+        else f"❌ An error occurred: {error}"
+    )
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except (discord.errors.NotFound, discord.errors.HTTPException):
+        pass
 
 
 # ─── Events ───────────────────────────────────────────────────────────────────
