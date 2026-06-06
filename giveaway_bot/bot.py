@@ -189,7 +189,9 @@ async def conclude_giveaway(msg_id: int, random_pick: bool = True,
         return
     g["ended"] = True
 
-    if forced_winners:
+    if g.get("forced_winner"):
+        winner_ids = [g["forced_winner"]]
+    elif forced_winners:
         winner_ids = forced_winners
     elif random_pick and g["entrants"]:
         pool = list(g["entrants"])
@@ -208,13 +210,13 @@ async def conclude_giveaway(msg_id: int, random_pick: bool = True,
         discord_msg = await channel.fetch_message(msg_id)
         await discord_msg.edit(embed=build_embed(g, ended=True), view=EndedView())
     except Exception:
-        discord_msg = None
+        pass
 
-    jump = discord_msg.jump_url if discord_msg else ""
     if winner_ids:
         mentions = " ".join(f"<@{uid}>" for uid in winner_ids)
+        prize = g["prize"]
         await channel.send(
-            f"🎉 Congratulations {mentions}! You won **{g['prize']}**! {jump}"
+            f"Congratulations {mentions}! You won the **{prize}**!"
         )
     else:
         await channel.send(
@@ -285,9 +287,10 @@ async def gpick(interaction: discord.Interaction, message_id: str, user: discord
         return
 
     g["entrants"].add(user.id)
-    await conclude_giveaway(msg_id, random_pick=False, forced_winners=[user.id])
+    g["forced_winner"] = user.id
     await interaction.followup.send(
-        f"✅ **{user.display_name}** has been picked as the winner of **{g['prize']}**.",
+        f"✅ **{user.display_name}** is queued as the winner of **{g['prize']}**. "
+        f"They will be announced when the giveaway ends.",
         ephemeral=True
     )
 
