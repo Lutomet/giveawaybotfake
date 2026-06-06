@@ -1,0 +1,8 @@
+[phases.setup]
+nixPkgs = ["python311"]
+
+[phases.install]
+cmds = ["pip install -r giveaway_bot/requirements.txt"]
+
+[start]
+cmd = "python3 giveaway_bot/bot.py"
