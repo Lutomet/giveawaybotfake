@@ -1,5 +1,5 @@
 """
-Giveaway Bot — slash command giveaway bot where YOU choose the winner.
+Giveaway Bot — embedslash command giveaway bot where YOU choose the winner.
 
 Setup:
   1. pip install -r requirements.txt
@@ -59,16 +59,16 @@ def owner_only(interaction: discord.Interaction) -> bool:
 
 # ─── Embed builder ───────────────────────────────────────────────────────────
 
+BLUE = 0x5865F2
+
 def build_embed(g: dict, ended: bool = False) -> discord.Embed:
     ends_at: datetime = g["ends_at"]
     ts = int(ends_at.timestamp())
 
     if ended:
-        color = 0x2b2d31  # dark/neutral
         if g.get("winner_ids"):
             winners_text = " ".join(f"<@{uid}>" for uid in g["winner_ids"])
             body = (
-                f"**{g['prize']}**\n\n"
                 f"**Winner(s):** {winners_text}\n"
                 f"**Hosted by:** <@{g['host']}>\n"
                 f"**Entries:** {len(g['entrants'])}\n"
@@ -76,32 +76,57 @@ def build_embed(g: dict, ended: bool = False) -> discord.Embed:
             )
         else:
             body = (
-                f"**{g['prize']}**\n\n"
                 f"**Winner(s):** No valid entrants.\n"
                 f"**Hosted by:** <@{g['host']}>\n"
                 f"**Entries:** {len(g['entrants'])}\n"
                 f"**Winners:** {g['winners']}"
             )
-        embed = discord.Embed(description=body, color=color)
-        embed.set_footer(text=f"Ended at")
+        embed = discord.Embed(title=g["prize"], description=body, color=BLUE)
+        embed.set_footer(text="Ended at")
         embed.timestamp = ends_at
     else:
-        color = 0x2b2d31
         body = (
-            f"**{g['prize']}**\n\n"
             f"**Ends:** <t:{ts}:R> (<t:{ts}:f>)\n"
             f"**Hosted by:** <@{g['host']}>\n"
             f"**Entries:** {len(g['entrants'])}\n"
             f"**Winners:** {g['winners']}"
         )
-        embed = discord.Embed(description=body, color=color)
-        embed.set_footer(text="")
+        embed = discord.Embed(title=g["prize"], description=body, color=BLUE)
         embed.timestamp = ends_at
 
     return embed
 
 
 # ─── Button view ─────────────────────────────────────────────────────────────
+
+class LeaveView(discord.ui.View):
+    def __init__(self, message_id: int, user_id: int):
+        super().__init__(timeout=60)
+        self.message_id = message_id
+        self.user_id = user_id
+
+    @discord.ui.button(label="Leave Giveaway", style=discord.ButtonStyle.danger)
+    async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.defer()
+            return
+
+        g = giveaways.get(self.message_id)
+        if g and not g["ended"]:
+            g["entrants"].discard(self.user_id)
+            try:
+                channel = bot.get_channel(g["channel_id"])
+                if channel:
+                    msg = await channel.fetch_message(self.message_id)
+                    view = GiveawayView(self.message_id)
+                    await msg.edit(embed=build_embed(g), view=view)
+            except Exception:
+                pass
+
+        self.stop()
+        await interaction.response.edit_message(
+            content="You have left the giveaway.", view=None)
+
 
 class GiveawayView(discord.ui.View):
     def __init__(self, message_id: int):
@@ -118,23 +143,25 @@ class GiveawayView(discord.ui.View):
             return
 
         uid = interaction.user.id
+
         if uid in g["entrants"]:
-            g["entrants"].discard(uid)
-            msg = f"You left the giveaway for **{g['prize']}**. Click again to re-enter."
-        else:
-            g["entrants"].add(uid)
-            msg = f"✅ You entered for **{g['prize']}**! Good luck!"
+            # Already entered — show "already entered" message with Leave button
+            leave_view = LeaveView(self.message_id, uid)
+            await interaction.response.send_message(
+                "You have already entered this giveaway!",
+                view=leave_view,
+                ephemeral=True
+            )
+            return
 
-        await interaction.response.send_message(msg, ephemeral=True)
+        # New entry — add silently and update the embed
+        g["entrants"].add(uid)
+        await interaction.response.defer()
 
-        # Refresh embed entry count
-        channel = bot.get_channel(g["channel_id"])
-        if channel:
-            try:
-                discord_msg = await channel.fetch_message(self.message_id)
-                await discord_msg.edit(embed=build_embed(g), view=self)
-            except Exception:
-                pass
+        try:
+            await interaction.message.edit(embed=build_embed(g), view=self)
+        except Exception:
+            pass
 
 
 class EndedView(discord.ui.View):
