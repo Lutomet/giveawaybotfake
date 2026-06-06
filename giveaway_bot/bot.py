@@ -21,17 +21,14 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
 
-load_dotenv()
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = os.environ.get("DISCORD_TOKEN")
 OWNER_ID = 1435693467421376551
 
 
 # ─── Bot setup ───────────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
-intents.members = True
 
 class GiveawayBot(discord.Client):
     def __init__(self):
