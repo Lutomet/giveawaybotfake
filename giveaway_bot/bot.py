@@ -18,6 +18,10 @@ Slash Commands (owner-only):
 import os
 import json
 import random
+import asyncio
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import discord
 from discord import app_commands
 from discord.ext import tasks
@@ -228,6 +232,26 @@ class EndedView(discord.ui.View):
             label="🎉", style=discord.ButtonStyle.grey, disabled=True))
 
 
+# ─── Health check server (keeps Railway from killing the process) ─────────────
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, *args):
+        pass  # silence access logs
+
+def _start_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    try:
+        server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+        server.serve_forever()
+    except OSError as e:
+        print(f"Health server could not start on port {port}: {e} (skipping)")
+
+
 # ─── Auto-end task ───────────────────────────────────────────────────────────
 
 @tasks.loop(seconds=5)
@@ -236,6 +260,13 @@ async def check_giveaways():
     for msg_id, g in list(giveaways.items()):
         if not g["ended"] and now >= g["ends_at"].replace(tzinfo=None):
             await conclude_giveaway(msg_id, random_pick=True)
+
+@check_giveaways.error
+async def check_giveaways_error(error: Exception):
+    print(f"[check_giveaways] Task error: {error} — restarting task in 10s")
+    await asyncio.sleep(10)
+    if not check_giveaways.is_running():
+        check_giveaways.start()
 
 
 async def conclude_giveaway(msg_id: int, random_pick: bool = True,
@@ -497,9 +528,33 @@ async def on_ready():
 
 # ─── Run ─────────────────────────────────────────────────────────────────────
 
+async def main():
+    delay = 5
+    while True:
+        try:
+            print(f"Connecting to Discord...")
+            async with bot:
+                await bot.start(TOKEN)
+        except discord.errors.LoginFailure:
+            print("ERROR: Invalid token. Check your DISCORD_TOKEN.")
+            break
+        except Exception as e:
+            print(f"Disconnected: {e}. Reconnecting in {delay}s...")
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60)  # exponential backoff, cap at 60s
+        else:
+            delay = 5  # reset backoff on clean disconnect
+
+
 if __name__ == "__main__":
     if not TOKEN:
         print("ERROR: No DISCORD_TOKEN found.")
         print("Set the DISCORD_TOKEN environment variable.")
         exit(1)
-    bot.run(TOKEN)
+
+    # Health check server in background thread so Railway doesn't kill us
+    t = threading.Thread(target=_start_health_server, daemon=True)
+    t.start()
+    print(f"Health check server started on port {os.environ.get('PORT', 8080)}")
+
+    asyncio.run(main())
