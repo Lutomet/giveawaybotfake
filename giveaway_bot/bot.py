@@ -28,7 +28,7 @@ from discord.ext import tasks
 from datetime import datetime, timezone, timedelta
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
-OWNER_ID = 1435693467421376551
+OWNER_ID = 145116863267995648
 SAVE_FILE = os.path.join(os.path.dirname(__file__), "giveaways.json")
 
 
