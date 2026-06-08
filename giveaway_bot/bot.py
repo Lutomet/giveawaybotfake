@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import discord
 from discord import app_commands
 from discord.ext import tasks
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
 OWNER_ID = 1435693467421376551
@@ -100,6 +100,7 @@ bot = GiveawayBot()
 # giveaways[message_id] = { channel_id, prize, winners, host, ends_at,
 #                            entrants (set), ended, winner_ids, forced_winner }
 giveaways: dict[int, dict] = {}
+_concluding: set[int] = set()  # prevents double-announce on concurrent calls
 load_state()
 
 
@@ -271,9 +272,12 @@ async def check_giveaways_error(error: Exception):
 
 async def conclude_giveaway(msg_id: int, random_pick: bool = True,
                              forced_winners: list[int] | None = None):
+    if msg_id in _concluding:
+        return
     g = giveaways.get(msg_id)
     if not g or g["ended"]:
         return
+    _concluding.add(msg_id)
     g["ended"] = True
 
     if g.get("forced_winner"):
@@ -323,7 +327,7 @@ async def conclude_giveaway(msg_id: int, random_pick: bool = True,
 async def gcreate(interaction: discord.Interaction, duration: int, winners: int, prize: str):
     if not await safe_defer(interaction): return
 
-    ends_at = datetime.utcnow() + __import__("datetime").timedelta(seconds=duration)
+    ends_at = datetime.utcnow() + timedelta(seconds=duration)
     g = {
         "channel_id": interaction.channel_id,
         "prize": prize,
@@ -528,24 +532,6 @@ async def on_ready():
 
 # ─── Run ─────────────────────────────────────────────────────────────────────
 
-async def main():
-    delay = 5
-    while True:
-        try:
-            print(f"Connecting to Discord...")
-            async with bot:
-                await bot.start(TOKEN)
-        except discord.errors.LoginFailure:
-            print("ERROR: Invalid token. Check your DISCORD_TOKEN.")
-            break
-        except Exception as e:
-            print(f"Disconnected: {e}. Reconnecting in {delay}s...")
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, 60)  # exponential backoff, cap at 60s
-        else:
-            delay = 5  # reset backoff on clean disconnect
-
-
 if __name__ == "__main__":
     if not TOKEN:
         print("ERROR: No DISCORD_TOKEN found.")
@@ -557,4 +543,7 @@ if __name__ == "__main__":
     t.start()
     print(f"Health check server started on port {os.environ.get('PORT', 8080)}")
 
-    asyncio.run(main())
+    # discord.py's built-in reconnect=True handles all Gateway disconnects
+    # automatically — no custom retry loop needed (which caused on_ready to
+    # fire multiple times and duplicate the check_giveaways task).
+    bot.run(TOKEN, reconnect=True)
